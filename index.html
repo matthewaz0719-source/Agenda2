@@ -84,6 +84,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 
   var MONTHS_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
   var DAYS_ES = ["L","M","M","J","V","S","D"];
+  var WEEKDAYS_FULL_ES = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
   var STORAGE_KEYS = { name: "agendaescolar:name", biometric: "agendaescolar:biometric", tasks: "agendaescolar:tasks", subjects: "agendaescolar:subjects" };
   var CATEGORIES = [
     { key: "trimestral", label: "Trimestral" },
@@ -114,6 +115,27 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
     return Math.round((target - today) / 86400000);
   }
   function uid() { return Math.random().toString(36).slice(2, 10); }
+
+  function dayHeaderLabel(dateStr) {
+    var dleft = daysUntil(dateStr);
+    var date = new Date(dateStr + "T00:00:00");
+    var weekday = WEEKDAYS_FULL_ES[date.getDay()];
+    if (dleft === 0) return "Hoy · " + weekday;
+    if (dleft === 1) return "Mañana · " + weekday;
+    if (dleft === -1) return "Ayer · " + weekday;
+    if (dleft < 0) return "Venció · " + fmtDate(dateStr);
+    return weekday.charAt(0).toUpperCase() + weekday.slice(1) + " " + fmtDate(dateStr);
+  }
+  function groupTasksByDay(tasks) {
+    var sorted = tasks.slice().sort(function (a, b) { return a.dueDate.localeCompare(b.dueDate); });
+    var groups = [];
+    sorted.forEach(function (t) {
+      var last = groups[groups.length - 1];
+      if (last && last.date === t.dueDate) { last.items.push(t); }
+      else { groups.push({ date: t.dueDate, items: [t] }); }
+    });
+    return groups;
+  }
 
   function storageGet(key) { try { return window.localStorage.getItem(key); } catch (e) { return null; } }
   function storageSet(key, value) { try { window.localStorage.setItem(key, value); } catch (e) {} }
@@ -161,6 +183,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
     logOut: '<path d="M9 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3M16 17l5-5-5-5M21 12H9"/>',
     x: '<path d="M18 6 6 18M6 6l12 12"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
     fingerprint: '<path d="M12 3a7 7 0 0 0-7 7v2c0 3 1 5.5 2.5 7.5M12 3a7 7 0 0 1 7 7v2c0 1.7-.3 3.2-.9 4.5M8.5 20A11 11 0 0 1 7 12a5 5 0 0 1 10 0v1.5"/><path d="M12 8a4 4 0 0 0-4 4c0 3 1 5.5 2.5 7.5M12 8a4 4 0 0 1 4 4c0 1.8-.3 3.3-.8 4.6"/><path d="M12 12v1.5c0 2.3.6 4.2 1.6 5.9"/>',
     shieldCheck: '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z"/><path d="M9 12l2 2 4-4"/>'
   };
@@ -178,9 +201,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
     tasks: [],
     subjects: [],
     calCursor: { year: todayD.getFullYear(), month: todayD.getMonth() },
+    selectedDay: null,
     expandedId: null,
     showAddSubject: false,
     addError: "",
+    editingTaskId: null,
     taskDraft: { title: "", description: "", subject: "", dueDate: "" },
     savedFlash: false
   };
@@ -189,10 +214,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   function persistSubjects() { storageSet(STORAGE_KEYS.subjects, JSON.stringify(state.subjects)); }
 
   // ---------- screen header ----------
-  function screenHeader(title) {
+  function screenHeader(title, backAction) {
+    backAction = backAction || "go-home";
     return '' +
     '<div class="flex items-center gap-3 px-4 sm:px-5 pt-6 pb-4">' +
-      '<button data-action="go-home" class="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style="background:#FFFFFF;border:1px solid ' + COLORS.paperEdge + ';">' + svgIcon(ICONS.arrowLeft, 18, COLORS.ink) + '</button>' +
+      '<button data-action="' + backAction + '" class="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style="background:#FFFFFF;border:1px solid ' + COLORS.paperEdge + ';">' + svgIcon(ICONS.arrowLeft, 18, COLORS.ink) + '</button>' +
       '<h2 style="font-family:\'Fraunces\',serif;color:' + COLORS.ink + ';" class="text-xl sm:text-2xl font-semibold truncate">' + esc(title) + '</h2>' +
     '</div>';
   }
@@ -278,6 +304,31 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   }
 
   // ---------- Calendar screen ----------
+  function renderTaskCard(t) {
+    var dleft = daysUntil(t.dueDate);
+    var overdue = dleft < 0, soon = dleft >= 0 && dleft <= 2;
+    return '' +
+    '<div class="rounded-xl p-4 relative" style="background:#FFFFFF;border:1px solid ' + COLORS.gridLine + ';">' +
+      '<div class="flex items-start justify-between gap-3">' +
+        '<div class="flex-1 min-w-0">' +
+          '<div style="font-family:\'Fraunces\',serif;color:' + COLORS.ink + ';" class="font-semibold truncate">' + esc(t.title) + '</div>' +
+          '<div style="color:' + COLORS.red + ';font-family:\'Inter\',sans-serif;" class="text-xs font-medium mt-0.5">' + esc(t.subject) + '</div>' +
+          (t.description ? '<div style="color:' + COLORS.muted + ';font-family:\'Inter\',sans-serif;" class="text-sm mt-1.5">' + esc(t.description) + '</div>' : '') +
+        '</div>' +
+        '<div class="flex items-center gap-1 shrink-0">' +
+          '<button data-action="edit-task" data-id="' + t.id + '" class="p-1">' + svgIcon(ICONS.edit, 15, COLORS.muted) + '</button>' +
+          '<button data-action="delete-task" data-id="' + t.id + '" class="p-1">' + svgIcon(ICONS.trash, 16, COLORS.muted) + '</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="flex items-center justify-between mt-3">' +
+        '<span style="font-family:\'JetBrains Mono\',monospace;color:' + COLORS.ink + ';" class="text-xs">' + fmtDate(t.dueDate) + '</span>' +
+        '<span class="text-xs font-semibold px-2 py-0.5 rounded-full" style="font-family:\'JetBrains Mono\',monospace;background:' + (overdue ? COLORS.redSoft : soon ? COLORS.yellowSoft : "#EAF0EA") + ';color:' + (overdue ? COLORS.red : soon ? "#8A6A17" : "#3D5C46") + ';">' +
+          (overdue ? "venció hace " + Math.abs(dleft) + "d" : dleft === 0 ? "hoy" : "en " + dleft + "d") +
+        '</span>' +
+      '</div>' +
+    '</div>';
+  }
+
   function renderCalendar() {
     var taskDates = {};
     state.tasks.forEach(function (t) { taskDates[t.dueDate] = (taskDates[t.dueDate] || 0) + 1; });
@@ -300,37 +351,47 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
       var dateStr = year + "-" + pad(month + 1) + "-" + pad(dd);
       var hasTask = taskDates[dateStr];
       var isToday = dateStr === todayStr;
-      return '<div class="aspect-square flex flex-col items-center justify-center rounded-lg text-sm relative" style="background:' + (hasTask ? COLORS.yellowSoft : "transparent") + ';color:' + (isToday ? COLORS.red : COLORS.ink) + ';font-weight:' + (isToday ? 700 : 400) + ';font-family:\'Inter\',sans-serif;border:' + (isToday ? "1.5px solid " + COLORS.red : "1px solid transparent") + ';">' +
-        dd + (hasTask ? '<span class="absolute" style="bottom:4px;width:4px;height:4px;border-radius:9999px;background:' + COLORS.yellow + ';"></span>' : '') +
-      '</div>';
+      var isSelected = state.selectedDay === dateStr;
+      var bg = isSelected ? COLORS.red : (hasTask ? COLORS.yellowSoft : "transparent");
+      var fg = isSelected ? "#FFFFFF" : (isToday ? COLORS.red : COLORS.ink);
+      var border = isSelected ? "1.5px solid " + COLORS.red : (isToday ? "1.5px solid " + COLORS.red : "1px solid transparent");
+      return '<button data-action="select-day" data-date="' + dateStr + '" class="aspect-square flex flex-col items-center justify-center rounded-lg text-sm relative" style="background:' + bg + ';color:' + fg + ';font-weight:' + (isToday || isSelected ? 700 : 400) + ';font-family:\'Inter\',sans-serif;border:' + border + ';">' +
+        dd + (hasTask && !isSelected ? '<span class="absolute" style="bottom:4px;width:4px;height:4px;border-radius:9999px;background:' + COLORS.yellow + ';"></span>' : '') +
+      '</button>';
     }).join("");
 
-    var upcoming = state.tasks.slice().sort(function (a, b) { return a.dueDate.localeCompare(b.dueDate); });
-    var upcomingHtml;
-    if (upcoming.length === 0) {
-      upcomingHtml = '<div class="text-center py-10" style="color:' + COLORS.muted + ';font-family:\'Inter\',sans-serif;">Todavía no hay nada agendado.</div>';
+    var lowerSectionHtml;
+    if (state.selectedDay) {
+      var dayTasks = state.tasks.filter(function (t) { return t.dueDate === state.selectedDay; });
+      var listHtml;
+      if (dayTasks.length === 0) {
+        listHtml = '<div class="text-center py-8" style="color:' + COLORS.muted + ';font-family:\'Inter\',sans-serif;">No tenés nada agendado este día.</div>';
+      } else {
+        listHtml = '<div class="flex flex-col gap-3">' + dayTasks.map(renderTaskCard).join("") + '</div>';
+      }
+      lowerSectionHtml = '' +
+      '<div class="flex items-center justify-between mb-3">' +
+        '<p style="font-family:\'Fraunces\',serif;color:' + COLORS.ink + ';" class="text-sm font-semibold capitalize">' + dayHeaderLabel(state.selectedDay) + '</p>' +
+        '<button data-action="clear-selected-day" style="color:' + COLORS.red + ';font-family:\'Inter\',sans-serif;" class="text-xs font-semibold">Ver todo</button>' +
+      '</div>' +
+      listHtml;
     } else {
-      upcomingHtml = '<div class="flex flex-col gap-3">' + upcoming.map(function (t) {
-        var dleft = daysUntil(t.dueDate);
-        var overdue = dleft < 0, soon = dleft >= 0 && dleft <= 2;
-        return '' +
-        '<div class="rounded-xl p-4 relative" style="background:#FFFFFF;border:1px solid ' + COLORS.gridLine + ';">' +
-          '<div class="flex items-start justify-between gap-3">' +
-            '<div class="flex-1 min-w-0">' +
-              '<div style="font-family:\'Fraunces\',serif;color:' + COLORS.ink + ';" class="font-semibold truncate">' + esc(t.title) + '</div>' +
-              '<div style="color:' + COLORS.red + ';font-family:\'Inter\',sans-serif;" class="text-xs font-medium mt-0.5">' + esc(t.subject) + '</div>' +
-              (t.description ? '<div style="color:' + COLORS.muted + ';font-family:\'Inter\',sans-serif;" class="text-sm mt-1.5">' + esc(t.description) + '</div>' : '') +
-            '</div>' +
-            '<button data-action="delete-task" data-id="' + t.id + '" class="shrink-0 p-1">' + svgIcon(ICONS.trash, 16, COLORS.muted) + '</button>' +
-          '</div>' +
-          '<div class="flex items-center justify-between mt-3">' +
-            '<span style="font-family:\'JetBrains Mono\',monospace;color:' + COLORS.ink + ';" class="text-xs">' + fmtDate(t.dueDate) + '</span>' +
-            '<span class="text-xs font-semibold px-2 py-0.5 rounded-full" style="font-family:\'JetBrains Mono\',monospace;background:' + (overdue ? COLORS.redSoft : soon ? COLORS.yellowSoft : "#EAF0EA") + ';color:' + (overdue ? COLORS.red : soon ? "#8A6A17" : "#3D5C46") + ';">' +
-              (overdue ? "venció hace " + Math.abs(dleft) + "d" : dleft === 0 ? "hoy" : "en " + dleft + "d") +
-            '</span>' +
-          '</div>' +
-        '</div>';
-      }).join("") + '</div>';
+      var groups = groupTasksByDay(state.tasks);
+      if (groups.length === 0) {
+        lowerSectionHtml = '' +
+        '<p style="font-family:\'JetBrains Mono\',monospace;color:' + COLORS.muted + ';letter-spacing:0.1em;" class="text-xs uppercase mb-3">Próximas entregas</p>' +
+        '<div class="text-center py-10" style="color:' + COLORS.muted + ';font-family:\'Inter\',sans-serif;">Todavía no hay nada agendado.</div>';
+      } else {
+        lowerSectionHtml = '' +
+        '<p style="font-family:\'JetBrains Mono\',monospace;color:' + COLORS.muted + ';letter-spacing:0.1em;" class="text-xs uppercase mb-3">Próximas entregas</p>' +
+        groups.map(function (g) {
+          return '' +
+          '<div class="mb-4">' +
+            '<button data-action="select-day" data-date="' + g.date + '" style="color:' + COLORS.muted + ';font-family:\'Inter\',sans-serif;" class="text-xs font-semibold uppercase mb-2 capitalize">' + dayHeaderLabel(g.date) + '</button>' +
+            '<div class="flex flex-col gap-3">' + g.items.map(renderTaskCard).join("") + '</div>' +
+          '</div>';
+        }).join("");
+      }
     }
 
     return '' +
@@ -346,8 +407,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
           '<div class="grid grid-cols-7 gap-1 mb-1">' + dayLabels + '</div>' +
           '<div class="grid grid-cols-7 gap-1">' + gridCells + '</div>' +
         '</div>' +
-        '<p style="font-family:\'JetBrains Mono\',monospace;color:' + COLORS.muted + ';letter-spacing:0.1em;" class="text-xs uppercase mb-3">Próximas entregas</p>' +
-        upcomingHtml +
+        lowerSectionHtml +
       '</div>' +
     '</div>';
   }
@@ -358,9 +418,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
     state.subjects.forEach(function (s) { if (names.indexOf(s.name) === -1) names.push(s.name); });
     var subjOptions = names.map(function (n) { return '<option value="' + esc(n) + '"></option>'; }).join("");
     var d = state.taskDraft;
+    var isEditing = !!state.editingTaskId;
     return '' +
     '<div style="background:' + COLORS.paper + ';min-height:100dvh;">' +
-      screenHeader("Agregar entrega") +
+      screenHeader(isEditing ? "Editar entrega" : "Agregar entrega", isEditing ? "go-calendar" : "go-home") +
       '<div class="px-4 sm:px-5 flex flex-col gap-4" style="padding-bottom:calc(env(safe-area-inset-bottom,0px) + 24px);">' +
         '<div><label style="font-family:\'JetBrains Mono\',monospace;color:' + COLORS.muted + ';letter-spacing:0.05em;" class="text-xs uppercase block mb-1.5">Título (tarea, trabajo o proyecto)</label>' +
           '<input id="task-title" placeholder="Ej. Ensayo de historia" value="' + esc(d.title) + '" style="font-family:\'Inter\',sans-serif;background:#FFFFFF;border:1px solid ' + COLORS.paperEdge + ';color:' + COLORS.ink + ';" class="w-full rounded-lg px-4 py-3 text-sm" /></div>' +
@@ -373,7 +434,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
           '<input id="task-due" type="date" value="' + esc(d.dueDate) + '" style="font-family:\'Inter\',sans-serif;background:#FFFFFF;border:1px solid ' + COLORS.paperEdge + ';color:' + COLORS.ink + ';" class="w-full rounded-lg px-4 py-3 text-sm" /></div>' +
         (state.addError ? '<p style="color:' + COLORS.red + ';font-family:\'Inter\',sans-serif;" class="text-xs -mt-2">' + esc(state.addError) + '</p>' : '') +
         '<button data-action="add-task" class="mt-2 w-full rounded-full py-3.5 text-sm font-semibold flex items-center justify-center gap-2" style="font-family:\'Inter\',sans-serif;background:' + COLORS.red + ';color:#FFFFFF;">' +
-          (state.savedFlash ? svgIcon(ICONS.check, 16) + ' Guardado' : 'Agregar a la agenda') +
+          (state.savedFlash ? svgIcon(ICONS.check, 16) + ' Guardado' : (isEditing ? 'Guardar cambios' : 'Agregar a la agenda')) +
         '</button>' +
       '</div>' +
     '</div>';
@@ -527,9 +588,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
       render();
       return;
     }
+    state.addError = "";
+    if (state.editingTaskId) {
+      var editId = state.editingTaskId;
+      state.tasks = state.tasks.map(function (t) {
+        return t.id === editId ? { id: editId, title: title, description: description, subject: subject, dueDate: dueDate } : t;
+      });
+      persistTasks();
+      state.editingTaskId = null;
+      state.taskDraft = { title: "", description: "", subject: "", dueDate: "" };
+      state.screen = "calendar";
+      render();
+      return;
+    }
     state.tasks = state.tasks.concat([{ id: uid(), title: title, description: description, subject: subject, dueDate: dueDate }]);
     persistTasks();
-    state.addError = "";
     state.taskDraft = { title: "", description: "", subject: "", dueDate: "" };
     state.savedFlash = true;
     render();
@@ -564,7 +637,25 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   function handleAction(action, el) {
     if (action === "go-home") { state.screen = "home"; render(); }
     else if (action === "go-calendar") { state.screen = "calendar"; render(); }
-    else if (action === "go-add") { state.addError = ""; state.screen = "add"; render(); }
+    else if (action === "go-add") {
+      state.addError = ""; state.editingTaskId = null;
+      state.taskDraft = { title: "", description: "", subject: "", dueDate: "" };
+      state.screen = "add"; render();
+    }
+    else if (action === "edit-task") {
+      var editTask = state.tasks.filter(function (t) { return t.id === el.dataset.id; })[0];
+      if (!editTask) return;
+      state.editingTaskId = editTask.id;
+      state.addError = "";
+      state.taskDraft = { title: editTask.title, description: editTask.description || "", subject: editTask.subject, dueDate: editTask.dueDate };
+      state.screen = "add";
+      render();
+    }
+    else if (action === "select-day") {
+      state.selectedDay = state.selectedDay === el.dataset.date ? null : el.dataset.date;
+      render();
+    }
+    else if (action === "clear-selected-day") { state.selectedDay = null; render(); }
     else if (action === "go-grades") { state.screen = "grades"; render(); }
     else if (action === "logout") { doLogout(); }
     else if (action === "login") { doLoginFromForm(false); }
